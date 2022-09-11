@@ -18,10 +18,12 @@ pattern ExprOpCdr :: Expr -> Expr
 pattern ExprOpCdr e = ExprList [ExprPrim PrimCdr, e]
 
 pattern ExprOpCond :: [(Expr, Expr)] -> Expr
-pattern ExprOpCond es <- ExprList (ExprPrim PrimCond : (uncond -> Just es))
+pattern ExprOpCond es <- ExprList (ExprPrim PrimCond : (traverse uncond -> Just es))
 
-uncond :: [Expr] -> Maybe [(Expr, Expr)]
-uncond = undefined
+uncond :: Expr -> Maybe (Expr, Expr)
+uncond = \case
+  ExprList [e1, e2] -> Just (e1, e2)
+  _ -> Nothing
 
 pattern ExprOpCons :: Expr -> Expr -> Expr
 pattern ExprOpCons e1 e2 = ExprList [ExprPrim PrimCons, e1, e2]
