@@ -8,6 +8,12 @@ library
     bytestring,
     containers,
     text,
+  default-extensions:
+    DerivingStrategies
+    LambdaCase
+    OverloadedStrings
+    PatternSynonyms
+    ViewPatterns
   default-language: Haskell2010
   exposed-modules:
     RootsOfLisp
