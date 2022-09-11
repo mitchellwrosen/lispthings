@@ -1,0 +1,14 @@
+cabal-version: 3.0
+name: lispthings
+version: 0
+
+library
+  build-depends:
+    base,
+    bytestring,
+    containers,
+    text,
+  default-language: Haskell2010
+  exposed-modules:
+    RootsOfLisp
+  hs-source-dirs: .

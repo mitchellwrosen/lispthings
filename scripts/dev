@@ -1,0 +1,5 @@
+#!/bin/bash
+
+ghcid \
+  --command 'cabal repl' \
+  --restart lispthings.cabal
