@@ -150,5 +150,5 @@ eval s =
     Left err -> Text.putStrLn ("Parse error: " <> err)
     Right expr ->
       case evaluate expr of
-        Left expr1 -> Text.putStrLn ("Bad expression: " <> Text.pack (show expr1))
+        Left expr1 -> Text.putStrLn ("Bad expression: " <> showExpr expr1)
         Right expr1 -> printExpr expr1
