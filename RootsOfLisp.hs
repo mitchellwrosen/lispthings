@@ -21,68 +21,43 @@ pattern ExprFalse = ExprList []
 pattern ExprTrue :: Expr
 pattern ExprTrue = ExprAtom "t"
 
-pattern ExprOpAtom :: Expr -> Expr
-pattern ExprOpAtom e = ExprList [ExprAtom "atom", e]
-
-pattern ExprOpCar :: Expr -> Expr
-pattern ExprOpCar e = ExprList [ExprAtom "car", e]
-
-pattern ExprOpCdr :: Expr -> Expr
-pattern ExprOpCdr e = ExprList [ExprAtom "cdr", e]
-
-pattern ExprOpCond :: [(Expr, Expr)] -> Expr
-pattern ExprOpCond es <- ExprList (ExprAtom "cond" : (traverse uncond -> Just es))
-
-uncond :: Expr -> Maybe (Expr, Expr)
-uncond = \case
-  ExprList [e1, e2] -> Just (e1, e2)
-  _ -> Nothing
-
-pattern ExprOpCons :: Expr -> Expr -> Expr
-pattern ExprOpCons e1 e2 = ExprList [ExprAtom "cons", e1, e2]
-
-pattern ExprOpEq :: Expr -> Expr -> Expr
-pattern ExprOpEq e1 e2 = ExprList [ExprAtom "eq", e1, e2]
-
-pattern ExprOpQuote :: Expr -> Expr
-pattern ExprOpQuote e = ExprList [ExprAtom "quote", e]
-
 type Eval a = Either Expr a
 
 evaluate :: Expr -> Eval Expr
-evaluate = \case
-  ExprOpAtom e ->
-    evaluate e >>= \case
-      ExprAtom _ -> Right ExprTrue
-      _ -> Right ExprFalse
-  ExprOpCar (evaluate -> Right (ExprList (e : _))) -> Right e
-  ExprOpCdr (evaluate -> Right (ExprList (_ : es))) -> Right (ExprList es)
-  expr@(ExprOpCond es) ->
-    evaluateCond es >>= \case
-      Nothing -> Left expr
-      Just e -> Right e
-  ExprOpCons e0 (evaluate -> Right (ExprList es)) -> do
-    e <- evaluate e0
-    Right (ExprList (e : es))
-  ExprOpEq u1 u2 -> do
-    e1 <- evaluate u1
-    e2 <- evaluate u2
-    case (e1, e2) of
-      (ExprAtom s1, ExprAtom s2) | s1 == s2 -> Right ExprTrue
-      (ExprList [], ExprList []) -> Right ExprTrue
-      _ -> Right ExprFalse
-  ExprOpQuote e -> Right e
-  e -> Left e
+evaluate expr0 =
+  case expr0 of
+    ExprList (ExprAtom "cond" : alts) ->
+      evaluateCond alts >>= \case
+        Nothing -> Left expr0
+        Just expr -> Right expr
+    ExprList [ExprAtom "quote", expr] -> Right expr
+    ExprList (ExprAtom name : args0) -> do
+      args <- traverse evaluate args0
+      case (name, args) of
+        ("atom", [arg]) ->
+          case arg of
+            ExprAtom _ -> Right ExprTrue
+            _ -> Right ExprFalse
+        ("car", [ExprList (expr : _)]) -> Right expr
+        ("cdr", [ExprList (_ : exprs)]) -> Right (ExprList exprs)
+        ("cons", [expr, ExprList exprs]) -> Right (ExprList (expr : exprs))
+        ("eq", [expr1, expr2]) ->
+          case (expr1, expr2) of
+            (ExprAtom atom1, ExprAtom atom2) | atom1 == atom2 -> Right ExprTrue
+            (ExprList [], ExprList []) -> Right ExprTrue
+            _ -> Right ExprFalse
+        _ -> Left expr0
+    _ -> Left expr0
 
-evaluateCond :: [(Expr, Expr)] -> Eval (Maybe Expr)
+evaluateCond :: [Expr] -> Eval (Maybe Expr)
 evaluateCond = \case
-  [] -> Right Nothing
-  (p, u) : es ->
-    evaluate p >>= \case
+  ExprList [lhs, rhs0] : alts ->
+    evaluate lhs >>= \case
       ExprTrue -> do
-        e <- evaluate u
-        Right (Just e)
-      _ -> evaluateCond es
+        rhs <- evaluate rhs0
+        Right (Just rhs)
+      _ -> evaluateCond alts
+  _ -> Right Nothing
 
 ------------------------------------------------------------------------------------------------------------------------
 -- The parser
