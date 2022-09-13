@@ -2,6 +2,8 @@ module RootsOfLisp where
 
 import qualified Control.Monad.Combinators as Monad
 import qualified Data.Char as Char
+import Data.Map (Map)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -21,18 +23,20 @@ pattern ExprFalse = ExprList []
 pattern ExprTrue :: Expr
 pattern ExprTrue = ExprAtom "t"
 
+type Env = Map Text Expr
+
 type Eval a = Either Expr a
 
-evaluate :: Expr -> Eval Expr
-evaluate expr0 =
+evaluate :: Env -> Expr -> Eval Expr
+evaluate env expr0 =
   case expr0 of
     ExprList (ExprAtom "cond" : alts) ->
-      evaluateCond alts >>= \case
+      evaluateCond env alts >>= \case
         Nothing -> Left expr0
         Just expr -> Right expr
     ExprList [ExprAtom "quote", expr] -> Right expr
     ExprList (ExprAtom name : args0) -> do
-      args <- traverse evaluate args0
+      args <- traverse (evaluate env) args0
       case (name, args) of
         ("atom", [arg]) ->
           case arg of
@@ -49,14 +53,14 @@ evaluate expr0 =
         _ -> Left expr0
     _ -> Left expr0
 
-evaluateCond :: [Expr] -> Eval (Maybe Expr)
-evaluateCond = \case
+evaluateCond :: Env -> [Expr] -> Eval (Maybe Expr)
+evaluateCond env = \case
   ExprList [lhs, rhs0] : alts ->
-    evaluate lhs >>= \case
+    evaluate env lhs >>= \case
       ExprTrue -> do
-        rhs <- evaluate rhs0
+        rhs <- evaluate env rhs0
         Right (Just rhs)
-      _ -> evaluateCond alts
+      _ -> evaluateCond env alts
   _ -> Right Nothing
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -124,6 +128,6 @@ eval s =
   case parseExpr s of
     Left err -> Text.putStrLn ("Parse error: " <> err)
     Right expr ->
-      case evaluate expr of
+      case evaluate Map.empty expr of
         Left expr1 -> Text.putStrLn ("Bad expression: " <> showExpr expr1)
         Right expr1 -> printExpr expr1
