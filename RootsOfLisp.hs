@@ -18,50 +18,112 @@ data Expr
   deriving stock (Eq, Ord, Show)
 
 pattern ExprFalse :: Expr
-pattern ExprFalse = ExprList []
+pattern ExprFalse = ExprAtom "f"
 
 pattern ExprTrue :: Expr
 pattern ExprTrue = ExprAtom "t"
 
 type Env = Map Text Expr
 
-type Eval a = Either Expr a
+type Eval a = Either EvalError a
+
+data EvalError
+  = ArityError Text Int Int
+  | CarEmptyList
+  | CdrEmptyList
+  | EmptyList
+  | ExpectedAtomGotList [Expr]
+  | ExpectedListGotAtom Text
+  | MalformedAlternative Expr
+  | UnboundVariable Text
+  | UnknownFunction Text
 
 evaluate :: Env -> Expr -> Eval Expr
-evaluate env expr0 =
-  case expr0 of
-    ExprList (ExprAtom "cond" : alts) ->
-      evaluateCond env alts >>= \case
-        Nothing -> Left expr0
-        Just expr -> Right expr
-    ExprList [ExprAtom "quote", expr] -> Right expr
-    ExprList (ExprAtom name : args0) -> do
-      args <- traverse (evaluate env) args0
-      case (name, args) of
-        ("atom", [arg]) ->
-          case arg of
-            ExprAtom _ -> Right ExprTrue
-            _ -> Right ExprFalse
-        ("car", [ExprList (expr : _)]) -> Right expr
-        ("cdr", [ExprList (_ : exprs)]) -> Right (ExprList exprs)
-        ("cons", [expr, ExprList exprs]) -> Right (ExprList (expr : exprs))
-        ("eq", [expr1, expr2]) ->
-          case (expr1, expr2) of
-            (ExprAtom atom1, ExprAtom atom2) | atom1 == atom2 -> Right ExprTrue
-            (ExprList [], ExprList []) -> Right ExprTrue
-            _ -> Right ExprFalse
-        _ -> Left expr0
-    _ -> Left expr0
+evaluate env = \case
+  ExprAtom var ->
+    case Map.lookup var env of
+      Nothing -> Left (UnboundVariable var)
+      Just expr -> Right expr
+  ExprList [] -> Left EmptyList
+  ExprList (ExprAtom name : exprs0) ->
+    case name of
+      "cond" -> evaluateCond env exprs0
+      "quote" ->
+        case exprs0 of
+          [expr] -> Right expr
+          _ -> Left (ArityError "quote" (length exprs0) 1)
+      _ -> do
+        args <- traverse (evaluate env) exprs0
+        case name of
+          "atom" ->
+            case args of
+              [arg] ->
+                case arg of
+                  ExprAtom _ -> Right ExprTrue
+                  _ -> Right ExprFalse
+              _ -> Left (ArityError name (length args) 1)
+          "car" ->
+            case args of
+              [arg] ->
+                case arg of
+                  ExprAtom atom -> Left (ExpectedListGotAtom atom)
+                  ExprList [] -> Left CarEmptyList
+                  ExprList (expr : _) -> Right expr
+              _ -> Left (ArityError name (length args) 1)
+          "cdr" ->
+            case args of
+              [arg] ->
+                case arg of
+                  ExprAtom atom -> Left (ExpectedListGotAtom atom)
+                  ExprList [] -> Left CdrEmptyList
+                  ExprList (_ : exprs) -> Right (ExprList exprs)
+              _ -> Left (ArityError name (length args) 1)
+          "cons" ->
+            case args of
+              [x, xs0] ->
+                case xs0 of
+                  ExprAtom atom -> Left (ExpectedListGotAtom atom)
+                  ExprList xs -> Right (ExprList (x : xs))
+              _ -> Left (ArityError name (length args) 2)
+          "eq" ->
+            case args of
+              [expr1, expr2] ->
+                case (expr1, expr2) of
+                  (ExprAtom atom1, ExprAtom atom2) | atom1 == atom2 -> Right ExprTrue
+                  (ExprList [], ExprList []) -> Right ExprTrue
+                  _ -> Right ExprFalse
+              _ -> Left (ArityError name (length args) 2)
+          _ -> Left (UnknownFunction name)
+  ExprList (ExprList exprs : _) -> Left (ExpectedAtomGotList exprs)
 
-evaluateCond :: Env -> [Expr] -> Eval (Maybe Expr)
+evaluateCond :: Env -> [Expr] -> Eval Expr
 evaluateCond env = \case
-  ExprList [lhs, rhs0] : alts ->
-    evaluate env lhs >>= \case
-      ExprTrue -> do
-        rhs <- evaluate env rhs0
-        Right (Just rhs)
-      _ -> evaluateCond env alts
-  _ -> Right Nothing
+  [] -> undefined
+  alt : alts ->
+    case alt of
+      ExprList [lhs, rhs0] ->
+        evaluate env lhs >>= \case
+          ExprTrue -> evaluate env rhs0
+          _ -> evaluateCond env alts
+      _ -> Left (MalformedAlternative alt)
+
+showEvalError :: EvalError -> Text
+showEvalError = \case
+  ArityError name actual expected ->
+    "Arity error in function «"
+      <> name
+      <> "»: expected "
+      <> Text.pack (show expected)
+      <> " argument(s), but got "
+      <> Text.pack (show actual)
+  CarEmptyList -> "car: ()"
+  CdrEmptyList -> "cdr: ()"
+  EmptyList -> "()"
+  ExpectedAtomGotList exprs -> "Expected an atom, but got list " <> showExpr (ExprList exprs)
+  ExpectedListGotAtom atom -> "Expected a list, but got atom «" <> atom <> "»"
+  MalformedAlternative expr -> "Arity error in alternative: " <> showExpr expr
+  UnboundVariable name -> "Unbound variable «" <> name <> "»"
+  UnknownFunction name -> "Unknown function «" <> name <> "»"
 
 ------------------------------------------------------------------------------------------------------------------------
 -- The parser
@@ -129,5 +191,5 @@ eval s =
     Left err -> Text.putStrLn ("Parse error: " <> err)
     Right expr ->
       case evaluate Map.empty expr of
-        Left expr1 -> Text.putStrLn ("Bad expression: " <> showExpr expr1)
+        Left err -> Text.putStrLn ("Error: " <> showEvalError err)
         Right expr1 -> printExpr expr1
