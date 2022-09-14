@@ -2,11 +2,13 @@ module RootsOfLisp where
 
 import qualified Control.Monad.Combinators as Monad
 import qualified Data.Char as Char
+import qualified Data.List as List
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+import Data.Traversable (for)
 import Data.Void (Void)
 import qualified Text.Megaparsec as P
 import qualified Text.Megaparsec.Char as P
@@ -34,16 +36,14 @@ data EvalError
   | EmptyList
   | ExpectedAtomGotList [Expr]
   | ExpectedListGotAtom Text
+  | LambdaArityError Int Int
   | MalformedAlternative Expr
+  | MalformedFunction [Expr]
   | UnboundVariable Text
-  | UnknownFunction Text
 
 evaluate :: Env -> Expr -> Eval Expr
 evaluate env = \case
-  ExprAtom var ->
-    case Map.lookup var env of
-      Nothing -> Left (UnboundVariable var)
-      Just expr -> Right expr
+  ExprAtom var -> evaluateAtom env var
   ExprList [] -> Left EmptyList
   ExprList (ExprAtom name : exprs0) ->
     case name of
@@ -93,8 +93,17 @@ evaluate env = \case
                   (ExprList [], ExprList []) -> Right ExprTrue
                   _ -> Right ExprFalse
               _ -> Left (ArityError name (length args) 2)
-          _ -> Left (UnknownFunction name)
-  ExprList (ExprList exprs : _) -> Left (ExpectedAtomGotList exprs)
+          _ ->
+            case Map.lookup name env of
+              Nothing -> Left (UnboundVariable name)
+              Just expr -> evaluate env (ExprList (expr : exprs0))
+  ExprList (ExprList func : args) -> evaluateFunctionCall env func args
+
+evaluateAtom :: Env -> Text -> Eval Expr
+evaluateAtom env var =
+  case Map.lookup var env of
+    Nothing -> Left (UnboundVariable var)
+    Just expr -> Right expr
 
 evaluateCond :: Env -> [Expr] -> Eval Expr
 evaluateCond env = \case
@@ -106,6 +115,35 @@ evaluateCond env = \case
           ExprTrue -> evaluate env rhs0
           _ -> evaluateCond env alts
       _ -> Left (MalformedAlternative alt)
+
+evaluateFunctionCall :: Env -> [Expr] -> [Expr] -> Eval Expr
+evaluateFunctionCall env func args0 =
+  case func of
+    [name0, params0, body] ->
+      case name0 of
+        ExprAtom "lambda" ->
+          case params0 of
+            ExprAtom atom -> Left (ExpectedListGotAtom atom)
+            ExprList params1 ->
+              let numParams = length params1
+                  numArgs = length args0
+               in if numParams == numArgs
+                    then do
+                      params2 <-
+                        for params1 \case
+                          ExprAtom param -> pure param
+                          -- Should we evaluate this? e.g:
+                          --   ((lambda ((quote p1) p2 p3) body) a1 a2 a3)
+                          --   ((lambda (p1         p2 p3) body) a1 a2 a3)
+                          -- Currently if given (quote p1) as an argument we fail.
+                          ExprList exprs -> Left (ExpectedAtomGotList exprs)
+                      args <- traverse (evaluate env) args0
+                      evaluate (List.foldl' (\acc (param, arg) -> Map.insert param arg acc) env (zip params2 args)) body
+                    else Left (LambdaArityError numArgs numParams)
+        _ -> do
+          name <- evaluate env name0
+          evaluateFunctionCall env [name, params0, body] args0
+    _ -> Left (MalformedFunction func)
 
 showEvalError :: EvalError -> Text
 showEvalError = \case
@@ -121,9 +159,14 @@ showEvalError = \case
   EmptyList -> "()"
   ExpectedAtomGotList exprs -> "Expected an atom, but got list " <> showExpr (ExprList exprs)
   ExpectedListGotAtom atom -> "Expected a list, but got atom «" <> atom <> "»"
+  LambdaArityError actual expected ->
+    "Arity error in lambda: expected "
+      <> Text.pack (show expected)
+      <> " argument(s), but got "
+      <> Text.pack (show actual)
   MalformedAlternative expr -> "Arity error in alternative: " <> showExpr expr
+  MalformedFunction exprs -> "Arity error in function: " <> showExpr (ExprList exprs)
   UnboundVariable name -> "Unbound variable «" <> name <> "»"
-  UnknownFunction name -> "Unknown function «" <> name <> "»"
 
 ------------------------------------------------------------------------------------------------------------------------
 -- The parser
