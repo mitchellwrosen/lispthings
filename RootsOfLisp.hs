@@ -236,3 +236,9 @@ eval s =
       case evaluate Map.empty expr of
         Left err -> Text.putStrLn ("Error: " <> showEvalError err)
         Right expr1 -> printExpr expr1
+
+repl :: IO ()
+repl = do
+  s <- Text.getLine
+  eval s
+  repl
