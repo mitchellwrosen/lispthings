@@ -47,56 +47,57 @@ evaluate env = \case
   ExprList [] -> Left EmptyList
   ExprList (ExprAtom name : exprs0) ->
     case name of
+      "atom" ->
+        case exprs0 of
+          [arg] ->
+            evaluate env arg >>= \case
+              ExprAtom _ -> Right ExprTrue
+              _ -> Right ExprFalse
+          _ -> Left (ArityError name (length exprs0) 1)
+      "car" ->
+        case exprs0 of
+          [arg] ->
+            evaluate env arg >>= \case
+              ExprAtom atom -> Left (ExpectedListGotAtom atom)
+              ExprList [] -> Left CarEmptyList
+              ExprList (expr : _) -> Right expr
+          _ -> Left (ArityError name (length exprs0) 1)
+      "cdr" ->
+        case exprs0 of
+          [arg] ->
+            evaluate env arg >>= \case
+              ExprAtom atom -> Left (ExpectedListGotAtom atom)
+              ExprList [] -> Left CdrEmptyList
+              ExprList (_ : exprs) -> Right (ExprList exprs)
+          _ -> Left (ArityError name (length exprs0) 1)
       "cond" -> evaluateCond env exprs0
+      "cons" ->
+        case exprs0 of
+          [x0, xs0] -> do
+            x <- evaluate env x0
+            xs1 <- evaluate env xs0
+            case xs1 of
+              ExprAtom atom -> Left (ExpectedListGotAtom atom)
+              ExprList xs2 -> Right (ExprList (x : xs2))
+          _ -> Left (ArityError name (length exprs0) 2)
+      "eq" ->
+        case exprs0 of
+          [expr01, expr02] -> do
+            expr1 <- evaluate env expr01
+            expr2 <- evaluate env expr02
+            case (expr1, expr2) of
+              (ExprAtom atom1, ExprAtom atom2) | atom1 == atom2 -> Right ExprTrue
+              (ExprList [], ExprList []) -> Right ExprTrue
+              _ -> Right ExprFalse
+          _ -> Left (ArityError name (length exprs0) 2)
       "quote" ->
         case exprs0 of
           [expr] -> Right expr
           _ -> Left (ArityError "quote" (length exprs0) 1)
-      _ -> do
-        args <- traverse (evaluate env) exprs0
-        case name of
-          "atom" ->
-            case args of
-              [arg] ->
-                case arg of
-                  ExprAtom _ -> Right ExprTrue
-                  _ -> Right ExprFalse
-              _ -> Left (ArityError name (length args) 1)
-          "car" ->
-            case args of
-              [arg] ->
-                case arg of
-                  ExprAtom atom -> Left (ExpectedListGotAtom atom)
-                  ExprList [] -> Left CarEmptyList
-                  ExprList (expr : _) -> Right expr
-              _ -> Left (ArityError name (length args) 1)
-          "cdr" ->
-            case args of
-              [arg] ->
-                case arg of
-                  ExprAtom atom -> Left (ExpectedListGotAtom atom)
-                  ExprList [] -> Left CdrEmptyList
-                  ExprList (_ : exprs) -> Right (ExprList exprs)
-              _ -> Left (ArityError name (length args) 1)
-          "cons" ->
-            case args of
-              [x, xs0] ->
-                case xs0 of
-                  ExprAtom atom -> Left (ExpectedListGotAtom atom)
-                  ExprList xs -> Right (ExprList (x : xs))
-              _ -> Left (ArityError name (length args) 2)
-          "eq" ->
-            case args of
-              [expr1, expr2] ->
-                case (expr1, expr2) of
-                  (ExprAtom atom1, ExprAtom atom2) | atom1 == atom2 -> Right ExprTrue
-                  (ExprList [], ExprList []) -> Right ExprTrue
-                  _ -> Right ExprFalse
-              _ -> Left (ArityError name (length args) 2)
-          _ ->
-            case Map.lookup name env of
-              Nothing -> Left (UnboundVariable name)
-              Just expr -> evaluate env (ExprList (expr : exprs0))
+      _ ->
+        case Map.lookup name env of
+          Nothing -> Left (UnboundVariable name)
+          Just expr -> evaluate env (ExprList (expr : exprs0))
   ExprList (ExprList func : args) -> evaluateFunctionCall env func args
 
 evaluateAtom :: Env -> Text -> Eval Expr
@@ -132,10 +133,6 @@ evaluateFunctionCall env func args0 =
                       params2 <-
                         for params1 \case
                           ExprAtom param -> pure param
-                          -- Should we evaluate this? e.g:
-                          --   ((lambda ((quote p1) p2 p3) body) a1 a2 a3)
-                          --   ((lambda (p1         p2 p3) body) a1 a2 a3)
-                          -- Currently if given (quote p1) as an argument we fail.
                           ExprList exprs -> Left (ExpectedAtomGotList exprs)
                       args <- traverse (evaluate env) args0
                       evaluate (List.foldl' (\acc (param, arg) -> Map.insert param arg acc) env (zip params2 args)) body
