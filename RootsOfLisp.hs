@@ -33,20 +33,21 @@ data EvalError
   = ArityError Text Int Int
   | CarEmptyList
   | CdrEmptyList
-  | EmptyList
   | ExpectedAtomGotList [Expr]
   | ExpectedListGotAtom Text
   | LambdaArityError Int Int
   | MalformedAlternative Expr
-  | MalformedFunction [Expr]
+  | MalformedLambda Expr
   | UnboundVariable Text
+  | UnexpectedExpr Expr
 
 evaluate :: Env -> Expr -> Eval Expr
 evaluate env = \case
+  -- x
   ExprAtom var -> evaluateAtom env var
-  ExprList [] -> Left EmptyList
   ExprList (ExprAtom name : exprs0) ->
     case name of
+      -- (atom ...)
       "atom" ->
         case exprs0 of
           [arg] ->
@@ -54,6 +55,7 @@ evaluate env = \case
               ExprAtom _ -> Right ExprTrue
               _ -> Right ExprFalse
           _ -> Left (ArityError name (length exprs0) 1)
+      -- (car ...)
       "car" ->
         case exprs0 of
           [arg] ->
@@ -62,6 +64,7 @@ evaluate env = \case
               ExprList [] -> Left CarEmptyList
               ExprList (expr : _) -> Right expr
           _ -> Left (ArityError name (length exprs0) 1)
+      -- (cdr ...)
       "cdr" ->
         case exprs0 of
           [arg] ->
@@ -70,7 +73,9 @@ evaluate env = \case
               ExprList [] -> Left CdrEmptyList
               ExprList (_ : exprs) -> Right (ExprList exprs)
           _ -> Left (ArityError name (length exprs0) 1)
+      -- (cond ...)
       "cond" -> evaluateCond env exprs0
+      -- (cons ...)
       "cons" ->
         case exprs0 of
           [x0, xs0] -> do
@@ -80,6 +85,7 @@ evaluate env = \case
               ExprAtom atom -> Left (ExpectedListGotAtom atom)
               ExprList xs2 -> Right (ExprList (x : xs2))
           _ -> Left (ArityError name (length exprs0) 2)
+      -- (eq ...)
       "eq" ->
         case exprs0 of
           [expr01, expr02] -> do
@@ -90,15 +96,36 @@ evaluate env = \case
               (ExprList [], ExprList []) -> Right ExprTrue
               _ -> Right ExprFalse
           _ -> Left (ArityError name (length exprs0) 2)
+      -- (quote ...)
       "quote" ->
         case exprs0 of
           [expr] -> Right expr
           _ -> Left (ArityError "quote" (length exprs0) 1)
+      -- (x ...)
       _ ->
         case Map.lookup name env of
           Nothing -> Left (UnboundVariable name)
           Just expr -> evaluate env (ExprList (expr : exprs0))
-  ExprList (ExprList func : args) -> evaluateFunctionCall env func args
+  -- ((lambda ...) ...)
+  ExprList (lambda@(ExprList (ExprAtom "lambda" : paramsAndBody)) : args0) ->
+    case paramsAndBody of
+      [params0, body] ->
+        case params0 of
+          ExprAtom atom -> Left (ExpectedListGotAtom atom)
+          ExprList params1 ->
+            let numParams = length params1
+                numArgs = length args0
+             in if numParams == numArgs
+                  then do
+                    params2 <-
+                      for params1 \case
+                        ExprAtom param -> pure param
+                        ExprList exprs -> Left (ExpectedAtomGotList exprs)
+                    args <- traverse (evaluate env) args0
+                    evaluate (List.foldl' (\acc (param, arg) -> Map.insert param arg acc) env (zip params2 args)) body
+                  else Left (LambdaArityError numArgs numParams)
+      _ -> Left (MalformedLambda lambda)
+  expr -> Left (UnexpectedExpr expr)
 
 evaluateAtom :: Env -> Text -> Eval Expr
 evaluateAtom env var =
@@ -117,31 +144,6 @@ evaluateCond env = \case
           _ -> evaluateCond env alts
       _ -> Left (MalformedAlternative alt)
 
-evaluateFunctionCall :: Env -> [Expr] -> [Expr] -> Eval Expr
-evaluateFunctionCall env func args0 =
-  case func of
-    [name0, params0, body] ->
-      case name0 of
-        ExprAtom "lambda" ->
-          case params0 of
-            ExprAtom atom -> Left (ExpectedListGotAtom atom)
-            ExprList params1 ->
-              let numParams = length params1
-                  numArgs = length args0
-               in if numParams == numArgs
-                    then do
-                      params2 <-
-                        for params1 \case
-                          ExprAtom param -> pure param
-                          ExprList exprs -> Left (ExpectedAtomGotList exprs)
-                      args <- traverse (evaluate env) args0
-                      evaluate (List.foldl' (\acc (param, arg) -> Map.insert param arg acc) env (zip params2 args)) body
-                    else Left (LambdaArityError numArgs numParams)
-        _ -> do
-          name <- evaluate env name0
-          evaluateFunctionCall env [name, params0, body] args0
-    _ -> Left (MalformedFunction func)
-
 showEvalError :: EvalError -> Text
 showEvalError = \case
   ArityError name actual expected ->
@@ -153,7 +155,6 @@ showEvalError = \case
       <> Text.pack (show actual)
   CarEmptyList -> "car: ()"
   CdrEmptyList -> "cdr: ()"
-  EmptyList -> "()"
   ExpectedAtomGotList exprs -> "Expected an atom, but got list " <> showExpr (ExprList exprs)
   ExpectedListGotAtom atom -> "Expected a list, but got atom «" <> atom <> "»"
   LambdaArityError actual expected ->
@@ -162,8 +163,9 @@ showEvalError = \case
       <> " argument(s), but got "
       <> Text.pack (show actual)
   MalformedAlternative expr -> "Arity error in alternative: " <> showExpr expr
-  MalformedFunction exprs -> "Arity error in function: " <> showExpr (ExprList exprs)
+  MalformedLambda expr -> "Arity error in lambda: " <> showExpr expr
   UnboundVariable name -> "Unbound variable «" <> name <> "»"
+  UnexpectedExpr expr -> "Unexpected expr: " <> showExpr expr
 
 ------------------------------------------------------------------------------------------------------------------------
 -- The parser
