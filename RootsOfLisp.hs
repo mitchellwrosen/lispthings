@@ -2,6 +2,7 @@ module RootsOfLisp where
 
 import Control.Monad (guard)
 import qualified Control.Monad.Combinators as Monad
+import Control.Monad.Trans.Reader (ReaderT (..))
 import qualified Data.Char as Char
 import Data.Containers.ListUtils (nubOrd)
 import qualified Data.List as List
@@ -29,7 +30,13 @@ pattern ExprTrue = ExprAtom "t"
 
 type Env = Map Text Expr
 
-type Eval a = Either EvalError a
+newtype Eval a
+  = Eval ([Context] -> Either ([Context], EvalError) a)
+  deriving (Applicative, Functor, Monad) via (ReaderT [Context] (Either ([Context], EvalError)))
+
+data Context
+  = ContextFunction Text
+  deriving stock (Show)
 
 data EvalError
   = ArityError Text Int Int
@@ -44,6 +51,18 @@ data EvalError
   | UnboundVariable Text
   | UnexpectedExpr Expr
 
+runEval :: Eval a -> Either ([Context], EvalError) a
+runEval (Eval f) =
+  f []
+
+push :: Context -> Eval a -> Eval a
+push x (Eval f) =
+  Eval \xs -> f (x : xs)
+
+bomb :: EvalError -> Eval a
+bomb err =
+  Eval \context -> Left (context, err)
+
 evaluate :: Env -> Expr -> Eval Expr
 evaluate env = \case
   -- x
@@ -55,27 +74,27 @@ evaluate env = \case
         case exprs0 of
           [arg] ->
             evaluate env arg >>= \case
-              ExprAtom _ -> Right ExprTrue
-              _ -> Right ExprFalse
-          _ -> Left (ArityError name (length exprs0) 1)
+              ExprAtom _ -> pure ExprTrue
+              _ -> pure ExprFalse
+          _ -> bomb (ArityError name (length exprs0) 1)
       -- (car ...)
       "car" ->
         case exprs0 of
           [arg] ->
             evaluate env arg >>= \case
-              ExprAtom atom -> Left (ExpectedListGotAtom atom)
-              ExprList [] -> Left CarEmptyList
-              ExprList (expr : _) -> Right expr
-          _ -> Left (ArityError name (length exprs0) 1)
+              ExprAtom atom -> bomb (ExpectedListGotAtom atom)
+              ExprList [] -> bomb CarEmptyList
+              ExprList (expr : _) -> pure expr
+          _ -> bomb (ArityError name (length exprs0) 1)
       -- (cdr ...)
       "cdr" ->
         case exprs0 of
           [arg] ->
             evaluate env arg >>= \case
-              ExprAtom atom -> Left (ExpectedListGotAtom atom)
-              ExprList [] -> Left CdrEmptyList
-              ExprList (_ : exprs) -> Right (ExprList exprs)
-          _ -> Left (ArityError name (length exprs0) 1)
+              ExprAtom atom -> bomb (ExpectedListGotAtom atom)
+              ExprList [] -> bomb CdrEmptyList
+              ExprList (_ : exprs) -> pure (ExprList exprs)
+          _ -> bomb (ArityError name (length exprs0) 1)
       -- (cond ...)
       "cond" -> evaluateCond env exprs0
       -- (cons ...)
@@ -85,9 +104,9 @@ evaluate env = \case
             x <- evaluate env x0
             xs1 <- evaluate env xs0
             case xs1 of
-              ExprAtom atom -> Left (ExpectedListGotAtom atom)
-              ExprList xs2 -> Right (ExprList (x : xs2))
-          _ -> Left (ArityError name (length exprs0) 2)
+              ExprAtom atom -> bomb (ExpectedListGotAtom atom)
+              ExprList xs2 -> pure (ExprList (x : xs2))
+          _ -> bomb (ArityError name (length exprs0) 2)
       -- (eq ...)
       "eq" ->
         case exprs0 of
@@ -95,18 +114,18 @@ evaluate env = \case
             expr1 <- evaluate env expr01
             expr2 <- evaluate env expr02
             case (expr1, expr2) of
-              (ExprAtom atom1, ExprAtom atom2) | atom1 == atom2 -> Right ExprTrue
-              (ExprList [], ExprList []) -> Right ExprTrue
-              _ -> Right ExprFalse
-          _ -> Left (ArityError name (length exprs0) 2)
+              (ExprAtom atom1, ExprAtom atom2) | atom1 == atom2 -> pure ExprTrue
+              (ExprList [], ExprList []) -> pure ExprTrue
+              _ -> pure ExprFalse
+          _ -> bomb (ArityError name (length exprs0) 2)
       "quote" ->
         case exprs0 of
-          [expr] -> Right expr
-          _ -> Left (ArityError "quote" (length exprs0) 1)
+          [expr] -> pure expr
+          _ -> bomb (ArityError "quote" (length exprs0) 1)
       -- (x ...)
       _ ->
         case Map.lookup name env of
-          Nothing -> Left (UnboundVariable name)
+          Nothing -> bomb (UnboundVariable name)
           Just expr -> evaluate env (ExprList (expr : exprs0))
   -- ((label ...) ...)
   ExprList (lambda@(ExprList ((ExprAtom "label" : labelAndLambda))) : args0) ->
@@ -125,8 +144,8 @@ evaluate env = \case
                               (Map.insert label lambda env)
                               (zip params args)
                       evaluate env1 body
-                    else Left (LambdaArityError numArgs numParams)
-      _ -> Left (MalformedLambda lambda)
+                    else bomb (LambdaArityError numArgs numParams)
+      _ -> bomb (MalformedLambda lambda)
   -- ((lambda ...) ...)
   ExprList (lambda@(ExprList (ExprAtom "lambda" : paramsAndBody)) : args0) ->
     case paramsAndBody of
@@ -137,9 +156,9 @@ evaluate env = \case
                 args <- traverse (evaluate env) args0
                 let env1 = List.foldl' (\acc (param, arg) -> Map.insert param arg acc) env (zip params args)
                 evaluate env1 body
-              else Left (LambdaArityError numArgs numParams)
-      _ -> Left (MalformedLambda lambda)
-  expr -> Left (UnexpectedExpr expr)
+              else bomb (LambdaArityError numArgs numParams)
+      _ -> bomb (MalformedLambda lambda)
+  expr -> bomb (UnexpectedExpr expr)
 
 matchParams :: Expr -> Maybe ([Text], Int)
 matchParams = \case
@@ -156,8 +175,8 @@ matchParams = \case
 evaluateAtom :: Env -> Text -> Eval Expr
 evaluateAtom env var =
   case Map.lookup var env of
-    Nothing -> Left (UnboundVariable var)
-    Just expr -> Right expr
+    Nothing -> bomb (UnboundVariable var)
+    Just expr -> pure expr
 
 evaluateCond :: Env -> [Expr] -> Eval Expr
 evaluateCond env = \case
@@ -168,7 +187,7 @@ evaluateCond env = \case
         evaluate env lhs >>= \case
           ExprTrue -> evaluate env rhs0
           _ -> evaluateCond env alts
-      _ -> Left (MalformedAlternative alt)
+      _ -> bomb (MalformedAlternative alt)
 
 showEvalError :: EvalError -> Text
 showEvalError = \case
@@ -259,8 +278,10 @@ eval s =
   case parseExpr s of
     Left err -> Text.putStrLn ("Parse error: " <> err)
     Right expr ->
-      case evaluate Map.empty expr of
-        Left err -> Text.putStrLn ("Error: " <> showEvalError err)
+      case runEval (evaluate Map.empty expr) of
+        Left (context, err) -> do
+          Text.putStrLn (Text.pack (show context))
+          Text.putStrLn ("Error: " <> showEvalError err)
         Right expr1 -> printExpr expr1
 
 repl :: IO ()

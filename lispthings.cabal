@@ -10,9 +10,11 @@ library
     megaparsec == 9.2.2,
     parser-combinators,
     text,
+    transformers,
   default-extensions:
     BlockArguments
     DerivingStrategies
+    DerivingVia
     LambdaCase
     OverloadedStrings
     PatternSynonyms
