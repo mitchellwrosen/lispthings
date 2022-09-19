@@ -1,10 +1,11 @@
 module RootsOfLisp where
 
-import Control.Monad (guard)
+import Control.Monad (guard, when)
 import qualified Control.Monad.Combinators as Monad
 import Control.Monad.Trans.Reader (ReaderT (..))
 import qualified Data.Char as Char
 import Data.Containers.ListUtils (nubOrd)
+import Data.Functor ((<&>))
 import qualified Data.List as List
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
@@ -35,14 +36,24 @@ newtype Eval a
   deriving (Applicative, Functor, Monad) via (ReaderT [Context] (Either ([Context], EvalError)))
 
 data Context
-  = ContextFunction Text
+  = ContextArgument Int
+  | ContextFunction Text
+  | ContextLambda
   deriving stock (Show)
 
+showContext :: [Context] -> Text
+showContext =
+  Text.intercalate ", " . map show1 . reverse
+  where
+    show1 :: Context -> Text
+    show1 = \case
+      ContextArgument n -> "argument " <> Text.pack (show n)
+      ContextFunction name -> "function «" <> name <> "»"
+      ContextLambda -> "lambda"
+
 data EvalError
-  = ArityError Text Int Int
-  | CarEmptyList
-  | CdrEmptyList
-  | DuplicateParameters Expr
+  = ArityError Int Int
+  | EmptyList
   | ExpectedAtomGotList [Expr]
   | ExpectedListGotAtom Text
   | LambdaArityError Int Int
@@ -71,94 +82,86 @@ evaluate env = \case
     case name of
       -- (atom ...)
       "atom" ->
-        case exprs0 of
-          [arg] ->
-            evaluate env arg >>= \case
-              ExprAtom _ -> pure ExprTrue
-              _ -> pure ExprFalse
-          _ -> bomb (ArityError name (length exprs0) 1)
+        push (ContextFunction name) do
+          evaluateArg1 env exprs0 <&> \case
+            ExprAtom _ -> ExprTrue
+            _ -> ExprFalse
       -- (car ...)
       "car" ->
-        case exprs0 of
-          [arg] ->
-            evaluate env arg >>= \case
-              ExprAtom atom -> bomb (ExpectedListGotAtom atom)
-              ExprList [] -> bomb CarEmptyList
-              ExprList (expr : _) -> pure expr
-          _ -> bomb (ArityError name (length exprs0) 1)
+        push (ContextFunction name) do
+          result <- evaluateArg1 env exprs0
+          (expr, _) <- push (ContextArgument 1) (matchNonEmptyList result)
+          pure expr
       -- (cdr ...)
       "cdr" ->
-        case exprs0 of
-          [arg] ->
-            evaluate env arg >>= \case
-              ExprAtom atom -> bomb (ExpectedListGotAtom atom)
-              ExprList [] -> bomb CdrEmptyList
-              ExprList (_ : exprs) -> pure (ExprList exprs)
-          _ -> bomb (ArityError name (length exprs0) 1)
+        push (ContextFunction name) do
+          result <- evaluateArg1 env exprs0
+          (_, exprs) <- push (ContextArgument 1) (matchNonEmptyList result)
+          pure (ExprList exprs)
       -- (cond ...)
       "cond" -> evaluateCond env exprs0
       -- (cons ...)
       "cons" ->
-        case exprs0 of
-          [x0, xs0] -> do
-            x <- evaluate env x0
-            xs1 <- evaluate env xs0
-            case xs1 of
-              ExprAtom atom -> bomb (ExpectedListGotAtom atom)
-              ExprList xs2 -> pure (ExprList (x : xs2))
-          _ -> bomb (ArityError name (length exprs0) 2)
+        push (ContextFunction name) do
+          (x, xs0) <- evaluateArg2 env exprs0
+          case xs0 of
+            ExprAtom atom -> push (ContextArgument 2) (bomb (ExpectedListGotAtom atom))
+            ExprList xs -> pure (ExprList (x : xs))
       -- (eq ...)
       "eq" ->
-        case exprs0 of
-          [expr01, expr02] -> do
-            expr1 <- evaluate env expr01
-            expr2 <- evaluate env expr02
-            case (expr1, expr2) of
-              (ExprAtom atom1, ExprAtom atom2) | atom1 == atom2 -> pure ExprTrue
-              (ExprList [], ExprList []) -> pure ExprTrue
-              _ -> pure ExprFalse
-          _ -> bomb (ArityError name (length exprs0) 2)
-      "quote" ->
-        case exprs0 of
-          [expr] -> pure expr
-          _ -> bomb (ArityError "quote" (length exprs0) 1)
+        push (ContextFunction name) do
+          evaluateArg2 env exprs0 <&> \case
+            (ExprAtom atom1, ExprAtom atom2) | atom1 == atom2 -> ExprTrue
+            (ExprList [], ExprList []) -> ExprTrue
+            _ -> ExprFalse
+      "quote" -> push (ContextFunction name) (matchArg1 exprs0)
       -- (x ...)
-      _ ->
-        case Map.lookup name env of
-          Nothing -> bomb (UnboundVariable name)
-          Just expr -> evaluate env (ExprList (expr : exprs0))
+      _ -> do
+        expr <- evaluateAtom env name
+        push (ContextFunction name) (evaluate env (ExprList (expr : exprs0)))
   -- ((label ...) ...)
   ExprList (lambda@(ExprList ((ExprAtom "label" : labelAndLambda))) : args0) ->
-    case labelAndLambda of
-      [ ExprAtom label,
-        ExprList [ExprAtom "lambda", matchParams -> Just (params, numParams), body]
-        ]
-          | label `notElem` params ->
-              let numArgs = length args0
-               in if numParams == numArgs
-                    then do
-                      args <- traverse (evaluate env) args0
-                      let env1 =
-                            List.foldl'
-                              (\acc (param, arg) -> Map.insert param arg acc)
-                              (Map.insert label lambda env)
-                              (zip params args)
-                      evaluate env1 body
-                    else bomb (LambdaArityError numArgs numParams)
-      _ -> bomb (MalformedLambda lambda)
+    push ContextLambda do
+      (label, params, numParams, body) <- matchLabelParamsAndBody labelAndLambda
+      matchParamsAndArgs numParams args0
+      args <- evaluateArgs env args0
+      let env1 =
+            List.foldl'
+              (\acc (param, arg) -> Map.insert param arg acc)
+              (Map.insert label lambda env)
+              (zip params args)
+      evaluate env1 body
   -- ((lambda ...) ...)
-  ExprList (lambda@(ExprList (ExprAtom "lambda" : paramsAndBody)) : args0) ->
-    case paramsAndBody of
-      [matchParams -> Just (params, numParams), body] ->
-        let numArgs = length args0
-         in if numParams == numArgs
-              then do
-                args <- traverse (evaluate env) args0
-                let env1 = List.foldl' (\acc (param, arg) -> Map.insert param arg acc) env (zip params args)
-                evaluate env1 body
-              else bomb (LambdaArityError numArgs numParams)
-      _ -> bomb (MalformedLambda lambda)
+  ExprList (ExprList (ExprAtom "lambda" : paramsAndBody) : args0) ->
+    push ContextLambda do
+      (params, numParams, body) <- matchParamsAndBody paramsAndBody
+      matchParamsAndArgs numParams args0
+      args <- evaluateArgs env args0
+      let env1 = List.foldl' (\acc (param, arg) -> Map.insert param arg acc) env (zip params args)
+      evaluate env1 body
   expr -> bomb (UnexpectedExpr expr)
+
+matchArg1 :: [Expr] -> Eval Expr
+matchArg1 = \case
+  [arg] -> pure arg
+  args -> bomb (ArityError (length args) 1)
+
+matchArg2 :: [Expr] -> Eval (Expr, Expr)
+matchArg2 = \case
+  [arg1, arg2] -> pure (arg1, arg2)
+  args -> bomb (ArityError (length args) 2)
+
+matchLabelParamsAndBody :: [Expr] -> Eval (Text, [Text], Int, Expr)
+matchLabelParamsAndBody = \case
+  [ExprAtom label, ExprList [ExprAtom "lambda", matchParams -> Just (params, numParams), body]]
+    | label `notElem` params -> pure (label, params, numParams, body)
+  exprs -> bomb (MalformedLambda (ExprList (ExprAtom "label" : exprs)))
+
+matchNonEmptyList :: Expr -> Eval (Expr, [Expr])
+matchNonEmptyList = \case
+  ExprAtom atom -> bomb (ExpectedListGotAtom atom)
+  ExprList [] -> bomb EmptyList
+  ExprList (expr : exprs) -> pure (expr, exprs)
 
 matchParams :: Expr -> Maybe ([Text], Int)
 matchParams = \case
@@ -172,12 +175,40 @@ matchParams = \case
     Just (params1, numParams)
   _ -> Nothing
 
+matchParamsAndArgs :: Int -> [Expr] -> Eval ()
+matchParamsAndArgs numParams args =
+  when (numParams /= numArgs) (bomb (LambdaArityError numArgs numParams))
+  where
+    numArgs = length args
+
+matchParamsAndBody :: [Expr] -> Eval ([Text], Int, Expr)
+matchParamsAndBody = \case
+  [matchParams -> Just (params, numParams), body] -> pure (params, numParams, body)
+  exprs -> bomb (MalformedLambda (ExprList (ExprAtom "lambda" : exprs)))
+
+evaluateArg1 :: Env -> [Expr] -> Eval Expr
+evaluateArg1 env args = do
+  arg <- matchArg1 args
+  push (ContextArgument 1) (evaluate env arg)
+
+evaluateArg2 :: Env -> [Expr] -> Eval (Expr, Expr)
+evaluateArg2 env args = do
+  (arg1, arg2) <- matchArg2 args
+  result1 <- push (ContextArgument 1) (evaluate env arg1)
+  result2 <- push (ContextArgument 2) (evaluate env arg2)
+  pure (result1, result2)
+
+evaluateArgs :: Env -> [Expr] -> Eval [Expr]
+evaluateArgs env =
+  traverse (\(i, arg) -> push (ContextArgument i) (evaluate env arg)) . zip [(1 :: Int) ..]
+
 evaluateAtom :: Env -> Text -> Eval Expr
 evaluateAtom env var =
   case Map.lookup var env of
     Nothing -> bomb (UnboundVariable var)
     Just expr -> pure expr
 
+-- FIXME contexts
 evaluateCond :: Env -> [Expr] -> Eval Expr
 evaluateCond env = \case
   [] -> undefined
@@ -191,16 +222,12 @@ evaluateCond env = \case
 
 showEvalError :: EvalError -> Text
 showEvalError = \case
-  ArityError name actual expected ->
-    "Arity error in function «"
-      <> name
-      <> "»: expected "
+  ArityError actual expected ->
+    "Expected "
       <> Text.pack (show expected)
       <> " argument(s), but got "
       <> Text.pack (show actual)
-  CarEmptyList -> "car: ()"
-  CdrEmptyList -> "cdr: ()"
-  DuplicateParameters expr -> "Duplicate parameters in lambda: " <> showExpr expr
+  EmptyList -> "empty list"
   ExpectedAtomGotList exprs -> "Expected an atom, but got list " <> showExpr (ExprList exprs)
   ExpectedListGotAtom atom -> "Expected a list, but got atom «" <> atom <> "»"
   LambdaArityError actual expected ->
@@ -209,9 +236,9 @@ showEvalError = \case
       <> " argument(s), but got "
       <> Text.pack (show actual)
   MalformedAlternative expr -> "Arity error in alternative: " <> showExpr expr
-  MalformedLambda expr -> "Arity error in lambda: " <> showExpr expr
+  MalformedLambda expr -> "Malformed lambda: " <> showExpr expr
   UnboundVariable name -> "Unbound variable «" <> name <> "»"
-  UnexpectedExpr expr -> "Unexpected expr: " <> showExpr expr
+  UnexpectedExpr expr -> "Unexpected expression: " <> showExpr expr
 
 ------------------------------------------------------------------------------------------------------------------------
 -- The parser
@@ -280,7 +307,7 @@ eval s =
     Right expr ->
       case runEval (evaluate Map.empty expr) of
         Left (context, err) -> do
-          Text.putStrLn (Text.pack (show context))
+          Text.putStrLn ("In context: " <> showContext context)
           Text.putStrLn ("Error: " <> showEvalError err)
         Right expr1 -> printExpr expr1
 
