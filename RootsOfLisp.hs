@@ -229,15 +229,15 @@ showEvalError = \case
       <> Text.pack (show actual)
   EmptyList -> "empty list"
   ExpectedAtomGotList exprs -> "Expected an atom, but got list " <> showExpr (ExprList exprs)
-  ExpectedListGotAtom atom -> "Expected a list, but got atom «" <> atom <> "»"
+  ExpectedListGotAtom atom -> "Expected a list, but got atom: " <> atom
   LambdaArityError actual expected ->
-    "Arity error in lambda: expected "
+    "Arity error in function: expected "
       <> Text.pack (show expected)
       <> " argument(s), but got "
       <> Text.pack (show actual)
   MalformedAlternative expr -> "Arity error in alternative: " <> showExpr expr
   MalformedLambda expr -> "Malformed lambda: " <> showExpr expr
-  UnboundVariable name -> "Unbound variable «" <> name <> "»"
+  UnboundVariable name -> "Unbound variable: " <> name
   UnexpectedExpr expr -> "Unexpected expression: " <> showExpr expr
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -255,23 +255,22 @@ pexpr :: P Expr
 pexpr =
   plexeme do
     P.choice
-      [ ExprAtom <$> pexprAtom,
-        ExprList <$> pexprList
+      [ do
+          atom <- P.takeWhile1P (Just "atom character") \c ->
+            Char.isAlphaNum c
+              || (Char.isPunctuation c && c /= '\'' && c /= '(' && c /= ')')
+              || Char.isSymbol c
+          pure (ExprAtom atom),
+        do
+          _ <- psymbol "("
+          exprs <- Monad.many pexpr
+          _ <- psymbol ")"
+          pure (ExprList exprs),
+        do
+          _ <- P.char '\''
+          expr <- pexpr
+          pure (ExprList [ExprAtom "quote", expr])
       ]
-
-pexprAtom :: P Text
-pexprAtom =
-  P.takeWhile1P (Just "atom character") \c ->
-    Char.isAlphaNum c
-      || (Char.isPunctuation c && c /= '(' && c /= ')')
-      || Char.isSymbol c
-
-pexprList :: P [Expr]
-pexprList = do
-  _ <- psymbol "("
-  exprs <- Monad.many pexpr
-  _ <- psymbol ")"
-  pure exprs
 
 plexeme :: P a -> P a
 plexeme =
@@ -300,19 +299,28 @@ showExpr = \case
 ------------------------------------------------------------------------------------------------------------------------
 -- The interactive evaluator
 
-eval :: Text -> IO ()
-eval s =
+eval :: Expr -> (Expr -> IO ()) -> IO ()
+eval expr f =
+  case runEval (evaluate Map.empty expr) of
+    Left (context, err) -> do
+      Text.putStrLn ("In context: " <> showContext context)
+      Text.putStrLn ("Error: " <> showEvalError err)
+    Right expr1 -> f expr1
+
+parse :: Text -> (Expr -> IO ()) -> IO ()
+parse s f =
   case parseExpr s of
     Left err -> Text.putStrLn ("Parse error: " <> err)
-    Right expr ->
-      case runEval (evaluate Map.empty expr) of
-        Left (context, err) -> do
-          Text.putStrLn ("In context: " <> showContext context)
-          Text.putStrLn ("Error: " <> showEvalError err)
-        Right expr1 -> printExpr expr1
+    Right expr -> f expr
 
 repl :: IO ()
 repl = do
   s <- Text.getLine
-  eval s
+  Text.putStrLn "\n== parse =="
+  parse s \expr0 -> do
+    printExpr expr0
+    Text.putStrLn "\n== eval =="
+    eval expr0 \expr1 -> do
+      printExpr expr1
+    Text.putStrLn ""
   repl
