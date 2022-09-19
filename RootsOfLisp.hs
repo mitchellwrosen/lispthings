@@ -241,6 +241,27 @@ showEvalError = \case
   UnexpectedExpr expr -> "Unexpected expression: " <> showExpr expr
 
 ------------------------------------------------------------------------------------------------------------------------
+-- The desugarer
+
+desugar :: Expr -> Expr
+desugar =
+  defun
+
+-- (defun x y z) ==> (label x (lambda y z))
+defun :: Expr -> Expr
+defun =
+  bottomup \case
+    ExprList [ExprAtom "defun", expr1, expr2, expr3] ->
+      ExprList [ExprAtom "label", expr1, ExprList [ExprAtom "lambda", expr2, expr3]]
+    expr -> expr
+
+bottomup :: (Expr -> Expr) -> Expr -> Expr
+bottomup f expr =
+  case expr of
+    ExprAtom _ -> f expr
+    ExprList exprs -> f (ExprList (map (bottomup f) exprs))
+
+------------------------------------------------------------------------------------------------------------------------
 -- The parser
 
 type P a = P.Parsec Void Text a
@@ -319,8 +340,10 @@ repl = do
   Text.putStrLn "\n== parse =="
   parse s \expr0 -> do
     printExpr expr0
+    Text.putStrLn "\n== desugar =="
+    let expr1 = desugar expr0
+    printExpr expr1
     Text.putStrLn "\n== eval =="
-    eval expr0 \expr1 -> do
-      printExpr expr1
+    eval expr1 printExpr
     Text.putStrLn ""
   repl
