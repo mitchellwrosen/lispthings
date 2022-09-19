@@ -1,7 +1,9 @@
 module RootsOfLisp where
 
+import Control.Monad (guard)
 import qualified Control.Monad.Combinators as Monad
 import qualified Data.Char as Char
+import Data.Containers.ListUtils (nubOrd)
 import qualified Data.List as List
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
@@ -33,6 +35,7 @@ data EvalError
   = ArityError Text Int Int
   | CarEmptyList
   | CdrEmptyList
+  | DuplicateParameters Expr
   | ExpectedAtomGotList [Expr]
   | ExpectedListGotAtom Text
   | LambdaArityError Int Int
@@ -96,7 +99,6 @@ evaluate env = \case
               (ExprList [], ExprList []) -> Right ExprTrue
               _ -> Right ExprFalse
           _ -> Left (ArityError name (length exprs0) 2)
-      -- (quote ...)
       "quote" ->
         case exprs0 of
           [expr] -> Right expr
@@ -106,26 +108,50 @@ evaluate env = \case
         case Map.lookup name env of
           Nothing -> Left (UnboundVariable name)
           Just expr -> evaluate env (ExprList (expr : exprs0))
+  -- ((label ...) ...)
+  ExprList (lambda@(ExprList ((ExprAtom "label" : labelAndLambda))) : args0) ->
+    case labelAndLambda of
+      [ ExprAtom label,
+        ExprList [ExprAtom "lambda", matchParams -> Just (params, numParams), body]
+        ]
+          | label `notElem` params ->
+              let numArgs = length args0
+               in if numParams == numArgs
+                    then do
+                      args <- traverse (evaluate env) args0
+                      let env1 =
+                            List.foldl'
+                              (\acc (param, arg) -> Map.insert param arg acc)
+                              (Map.insert label lambda env)
+                              (zip params args)
+                      evaluate env1 body
+                    else Left (LambdaArityError numArgs numParams)
+      _ -> Left (MalformedLambda lambda)
   -- ((lambda ...) ...)
   ExprList (lambda@(ExprList (ExprAtom "lambda" : paramsAndBody)) : args0) ->
     case paramsAndBody of
-      [params0, body] ->
-        case params0 of
-          ExprAtom atom -> Left (ExpectedListGotAtom atom)
-          ExprList params1 ->
-            let numParams = length params1
-                numArgs = length args0
-             in if numParams == numArgs
-                  then do
-                    params2 <-
-                      for params1 \case
-                        ExprAtom param -> pure param
-                        ExprList exprs -> Left (ExpectedAtomGotList exprs)
-                    args <- traverse (evaluate env) args0
-                    evaluate (List.foldl' (\acc (param, arg) -> Map.insert param arg acc) env (zip params2 args)) body
-                  else Left (LambdaArityError numArgs numParams)
+      [matchParams -> Just (params, numParams), body] ->
+        let numArgs = length args0
+         in if numParams == numArgs
+              then do
+                args <- traverse (evaluate env) args0
+                let env1 = List.foldl' (\acc (param, arg) -> Map.insert param arg acc) env (zip params args)
+                evaluate env1 body
+              else Left (LambdaArityError numArgs numParams)
       _ -> Left (MalformedLambda lambda)
   expr -> Left (UnexpectedExpr expr)
+
+matchParams :: Expr -> Maybe ([Text], Int)
+matchParams = \case
+  ExprList params0 -> do
+    params1 <-
+      for params0 \case
+        ExprAtom param -> Just param
+        _ -> Nothing
+    let numParams = length params1
+    guard (numParams == length (nubOrd params1))
+    Just (params1, numParams)
+  _ -> Nothing
 
 evaluateAtom :: Env -> Text -> Eval Expr
 evaluateAtom env var =
@@ -155,6 +181,7 @@ showEvalError = \case
       <> Text.pack (show actual)
   CarEmptyList -> "car: ()"
   CdrEmptyList -> "cdr: ()"
+  DuplicateParameters expr -> "Duplicate parameters in lambda: " <> showExpr expr
   ExpectedAtomGotList exprs -> "Expected an atom, but got list " <> showExpr (ExprList exprs)
   ExpectedListGotAtom atom -> "Expected a list, but got atom «" <> atom <> "»"
   LambdaArityError actual expected ->
