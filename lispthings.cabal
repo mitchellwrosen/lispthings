@@ -10,6 +10,7 @@ library
     megaparsec == 9.2.2,
     parser-combinators,
     text,
+    text-ansi,
     transformers,
   default-extensions:
     BlockArguments

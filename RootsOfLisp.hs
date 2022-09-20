@@ -9,8 +9,11 @@ import Data.Functor ((<&>))
 import qualified Data.List as List
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.ANSI as Text
 import qualified Data.Text.IO as Text
 import Data.Traversable (for)
 import Data.Void (Void)
@@ -345,5 +348,119 @@ repl = do
     printExpr expr1
     Text.putStrLn "\n== eval =="
     eval expr1 printExpr
+    Text.putStrLn "\n== it's zippertime =="
+    let loop z = do
+          Text.putStrLn (renderz z)
+          case step z of
+            Nothing -> Text.putStrLn "Evaluation error."
+            Just (Left _expr) -> pure ()
+            Just (Right z1) -> do
+              _ <- getLine
+              loop z1
+    loop (zippeth expr1)
     Text.putStrLn ""
   repl
+
+------------------------------------------------------------------------------------------------------------------------
+-- Zipper experiments
+
+data Z
+  = Z Q Ctx
+
+data Q
+  = U Expr
+  | F [Expr]
+  | V Expr
+
+unq :: Q -> Expr
+unq = \case
+  U expr -> expr
+  F exprs -> ExprList exprs
+  V expr -> expr
+
+data Ctx
+  = Nil
+  | Ctx Env [Expr] Ctx [Expr]
+
+ctxenv :: Ctx -> Env
+ctxenv = \case
+  Nil -> Map.empty
+  Ctx env _ _ _ -> env
+
+zippeth :: Expr -> Z
+zippeth expr =
+  Z (U expr) Nil
+
+unzippeth :: Z -> Expr
+unzippeth z =
+  case itermay up z of
+    Z q _ -> unq q
+
+up :: Z -> Maybe Z
+up = \case
+  Z _ Nil -> Nothing
+  Z q (Ctx _ xs ctx ys) -> Just (Z (U (ExprList (reverse xs ++ [unq q] ++ ys))) ctx)
+
+step :: Z -> Maybe (Either Expr Z)
+step (Z q ctx0) =
+  case q of
+    U expr ->
+      case expr of
+        ExprAtom atom ->
+          case Map.lookup atom (ctxenv ctx0) of
+            Nothing ->
+              case ctx0 of
+                Ctx _ [] _ _ ->
+                  if Set.member atom builtin
+                    then Just (Right (Z (V expr) ctx0))
+                    else Nothing
+                _ -> Nothing
+            Just expr1 -> Just (Right (Z (U expr1) ctx0))
+        ExprList [] -> Nothing
+        ExprList (expr1 : exprs1) -> Just (Right (Z (U expr1) (Ctx (ctxenv ctx0) [] ctx0 exprs1)))
+    F exprs ->
+      case exprs of
+        [ExprAtom "atom", expr] ->
+          let result =
+                case expr of
+                  ExprAtom _ -> ExprTrue
+                  ExprList _ -> ExprFalse
+           in Just (Right (Z (V result) ctx0))
+        [ExprAtom "quote", expr] -> Just (Right (Z (V expr) ctx0))
+        _ -> error (show exprs)
+    V expr ->
+      case ctx0 of
+        Nil -> Just (Left expr)
+        Ctx env xs pctx ys ->
+          case (xs, expr) of
+            ([], ExprAtom "quote") -> Just (Right (Z (F (expr : ys)) pctx))
+            _ ->
+              case ys of
+                [] -> Just (Right (Z (F (reverse (expr : xs))) pctx))
+                z : zs -> Just (Right (Z (U z) (Ctx env (expr : xs) pctx zs)))
+  where
+    builtin :: Set Text
+    builtin =
+      Set.fromList
+        ["atom", "car", "cdr", "cond", "eq", "label", "lambda", "quote"]
+
+renderz :: Z -> Text
+renderz (Z q ctx0) =
+  let color =
+        case q of
+          U _ -> Text.red
+          F _ -> Text.magenta
+          V _ -> Text.blue
+   in go (color (showExpr (unq q))) ctx0
+  where
+    go expr = \case
+      Nil -> expr
+      Ctx env xs ctx ys ->
+        let expr1 = "(" <> Text.unwords (map showExpr (reverse xs) ++ [expr] ++ map showExpr ys) <> ")"
+         in go expr1 ctx
+
+itermay :: (a -> Maybe a) -> a -> a
+itermay f x =
+  case f x of
+    Nothing -> x
+    Just y -> itermay f y
