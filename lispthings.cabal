@@ -16,7 +16,11 @@ library
     BlockArguments
     DerivingStrategies
     DerivingVia
+    DuplicateRecordFields
     LambdaCase
+    NamedFieldPuns
+    NoFieldSelectors
+    OverloadedRecordDot
     OverloadedStrings
     PatternSynonyms
     ViewPatterns
