@@ -366,15 +366,15 @@ data Z
   = Z Ctx Q
 
 data Q
-  = U Expr
+  = Uninspected Expr
   | EvalFunction Text [Expr]
-  | V Expr
+  | Evaluated Expr
 
 unq :: Q -> Expr
 unq = \case
-  U expr -> expr
+  Uninspected expr -> expr
   EvalFunction name args -> ExprList (ExprAtom name : args)
-  V expr -> expr
+  Evaluated expr -> expr
 
 data Ctx
   = CtxNil
@@ -403,7 +403,7 @@ ctxenv = \case
 
 zippeth :: Expr -> Z
 zippeth expr =
-  Z CtxNil (U expr)
+  Z CtxNil (Uninspected expr)
 
 data Step
   = Failure
@@ -414,7 +414,7 @@ step :: Z -> Step
 step (Z ctx0 q) =
   case (ctx0, q) of
     (_, EvalFunction name args) ->
-      let succeed result = Step (Z ctx0 (V result))
+      let succeed result = Step (Z ctx0 (Evaluated result))
        in case (name, args) of
             ("atom", [expr]) ->
               succeed case expr of
@@ -430,12 +430,12 @@ step (Z ctx0 q) =
                 _ -> ExprFalse
             ("quote", [expr]) -> succeed expr
             _ -> Failure
-    (CtxNil, U expr) ->
+    (CtxNil, Uninspected expr) ->
       case expr of
         ExprAtom _ -> Failure
         ExprList exprs -> stepU ctx0 exprs
-    (CtxNil, V expr) -> Done expr
-    (CtxFunc ctx, U expr) ->
+    (CtxNil, Evaluated expr) -> Done expr
+    (CtxFunc ctx, Uninspected expr) ->
       case expr of
         ExprAtom atom ->
           case Map.lookup atom ctx.env of
@@ -447,21 +447,21 @@ step (Z ctx0 q) =
                   if Set.member atom (Set.fromList ["atom", "car", "cdr", "cons", "eq"])
                     then stepArgs ctx atom
                     else Failure
-            Just expr1 -> Step (Z ctx0 (U expr1))
+            Just expr1 -> Step (Z ctx0 (Uninspected expr1))
         ExprList exprs -> stepU ctx0 exprs
-    (CtxFunc ctx, V expr) ->
+    (CtxFunc ctx, Evaluated expr) ->
       case expr of
         ExprAtom name -> stepArgs ctx name
         -- TODO: lambda, label
         ExprList _ -> Failure
-    (CtxArgs ctx, U expr) ->
+    (CtxArgs ctx, Uninspected expr) ->
       case expr of
         ExprAtom atom ->
           case Map.lookup atom ctx.env of
             Nothing -> Failure
-            Just expr1 -> Step (Z ctx0 (V expr1))
+            Just expr1 -> Step (Z ctx0 (Evaluated expr1))
         ExprList exprs -> stepU ctx0 exprs
-    (CtxArgs ctx, V expr) ->
+    (CtxArgs ctx, Evaluated expr) ->
       case ctx.right of
         [] -> Step (Z ctx.parent (EvalFunction ctx.func (reverse (expr : ctx.left))))
         right1 : rights1 ->
@@ -473,7 +473,7 @@ step (Z ctx0 q) =
                     left = expr : ctx.left,
                     right = rights1
                   }
-           in Step (Z (CtxArgs ctx1) (U right1))
+           in Step (Z (CtxArgs ctx1) (Uninspected right1))
 
 stepArgs :: FuncCtx -> Text -> Step
 stepArgs ctx name =
@@ -488,7 +488,7 @@ stepArgs ctx name =
                 left = [],
                 right = args1
               }
-       in Step (Z (CtxArgs ctx1) (U arg1))
+       in Step (Z (CtxArgs ctx1) (Uninspected arg1))
 
 stepL :: [Expr] -> Maybe Expr
 stepL = \case
@@ -509,15 +509,15 @@ stepU ctx0 = \case
               env = ctxenv ctx0,
               args = exprs
             }
-     in Step (Z (CtxFunc ctx1) (U expr))
+     in Step (Z (CtxFunc ctx1) (Uninspected expr))
 
 renderz :: Z -> Text
 renderz (Z ctx0 q) =
   let color =
         case q of
-          U _ -> Text.whiteBg . Text.black
+          Uninspected _ -> Text.whiteBg . Text.black
           EvalFunction _ _ -> Text.magenta
-          V _ -> Text.blue
+          Evaluated _ -> Text.blue
    in go (color (showExpr (unq q))) ctx0
   where
     go expr = \case
