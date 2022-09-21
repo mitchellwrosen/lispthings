@@ -438,10 +438,7 @@ step (Z ctx0 q) =
                 _ -> Failure
             Just expr1 -> Step (Z ctx0 (U expr1))
         ExprList exprs -> stepU ctx0 exprs
-    (CtxFunc ctx, V expr) ->
-      case expr of
-        ExprAtom "quote" -> Step (Z ctx.parent (L (expr : ctx.args)))
-        _ -> stepArgs ctx expr
+    (CtxFunc ctx, V expr) -> stepArgs ctx expr
     (CtxArgs ctx, U expr) ->
       case expr of
         ExprAtom atom ->
