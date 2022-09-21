@@ -9,8 +9,6 @@ import Data.Functor ((<&>))
 import qualified Data.List as List
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
-import Data.Set (Set)
-import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.ANSI as Text
@@ -351,12 +349,11 @@ repl = do
     Text.putStrLn "\n== it's zippertime =="
     let loop z = do
           Text.putStrLn (renderz z)
+          _ <- getLine
           case step z of
-            Nothing -> Text.putStrLn "Evaluation error."
-            Just (Left _expr) -> pure ()
-            Just (Right z1) -> do
-              _ <- getLine
-              loop z1
+            Failure -> Text.putStrLn "Evaluation error."
+            Done _expr -> Text.putStrLn "Evaluation complete."
+            Step z1 -> loop z1
     loop (zippeth expr1)
     Text.putStrLn ""
   repl
@@ -369,13 +366,13 @@ data Z
 
 data Q
   = U Expr
-  | F [Expr]
+  | L [Expr]
   | V Expr
 
 unq :: Q -> Expr
 unq = \case
   U expr -> expr
-  F exprs -> ExprList exprs
+  L exprs -> ExprList exprs
   V expr -> expr
 
 data Ctx
@@ -407,108 +404,126 @@ zippeth :: Expr -> Z
 zippeth expr =
   Z CtxNil (U expr)
 
-step :: Z -> Maybe (Either Expr Z)
+data Step
+  = Failure
+  | Step Z
+  | Done Expr
+
+step :: Z -> Step
 step (Z ctx0 q) =
-  case ctx0 of
-    CtxNil ->
-      case q of
-        U expr ->
-          case expr of
-            ExprList (expr1 : exprs1) ->
-              let ctx1 =
-                    FuncCtx
-                      { parent = ctx0,
-                        env = ctxenv ctx0,
-                        args = exprs1
-                      }
-               in Just (Right (Z (CtxFunc ctx1) (U expr1)))
-            _ -> Nothing
-        F exprs ->
-          case stepF exprs of
-            Nothing -> Nothing
-            Just result -> Just (Right (Z ctx0 (V result)))
-        V expr -> Just (Left expr)
-    CtxFunc ctx ->
-      case q of
-        U expr ->
-          case expr of
-            ExprAtom atom ->
-              case Map.lookup atom ctx.env of
-                Nothing ->
-                  if Set.member atom builtin
-                    then Just (Right (Z ctx0 (V expr)))
-                    else Nothing
-                Just expr1 -> Just (Right (Z ctx0 (U expr1)))
-            ExprList [] -> Nothing
-            ExprList (expr1 : exprs1) ->
-              let ctx1 =
-                    FuncCtx
-                      { parent = ctx0,
-                        env = ctxenv ctx0,
-                        args = exprs1
-                      }
-               in Just (Right (Z (CtxFunc ctx1) (U expr1)))
-  where
-    -- case q of
-    --   U expr ->
-    --     case expr of
-    --       ExprAtom atom ->
-    --         case Map.lookup atom (ctxenv ctx0) of
-    --           Nothing ->
-    --             case ctx0 of
-    --               CtxFunc _ ->
-    --                 if Set.member atom builtin
-    --                   then Just (Right (Z (V expr) ctx0))
-    --                   else Nothing
-    --               _ -> Nothing
-    --           Just expr1 -> Just (Right (Z (U expr1) ctx0))
-    --       ExprList [] -> Nothing
-    --       ExprList (expr1 : exprs1) -> Just (Right (Z (U expr1) (Ctx (ctxenv ctx0) [] ctx0 exprs1)))
-    -- F exprs ->
-    --   case exprs of
-    --     [ExprAtom "atom", expr] ->
-    --       let result =
-    --             case expr of
-    --               ExprAtom _ -> ExprTrue
-    --               ExprList _ -> ExprFalse
-    --        in Just (Right (Z (V result) ctx0))
-    --     [ExprAtom "quote", expr] -> Just (Right (Z (V expr) ctx0))
-    --     _ -> error (show exprs)
-    -- V expr ->
-    --   case ctx0 of
-    --     Nil -> Just (Left expr)
-    --     Ctx env xs pctx ys ->
-    --       case (xs, expr) of
-    --         ([], ExprAtom "quote") -> Just (Right (Z (F (expr : ys)) pctx))
-    --         _ ->
-    --           case ys of
-    --             [] -> Just (Right (Z (F (reverse (expr : xs))) pctx))
-    --             z : zs -> Just (Right (Z (U z) (Ctx env (expr : xs) pctx zs)))
+  case (ctx0, q) of
+    (_, L exprs) ->
+      case stepL exprs of
+        Nothing -> Failure
+        Just result -> Step (Z ctx0 (V result))
+    (CtxNil, U expr) ->
+      case expr of
+        ExprAtom _ -> Failure
+        ExprList exprs -> stepU ctx0 exprs
+    (CtxNil, V expr) -> Done expr
+    (CtxFunc ctx, U expr) ->
+      case expr of
+        ExprAtom atom ->
+          case Map.lookup atom ctx.env of
+            Nothing ->
+              case atom of
+                "atom" -> stepArgs ctx expr
+                "car" -> stepArgs ctx expr
+                "cdr" -> stepArgs ctx expr
+                "cond" -> undefined
+                "eq" -> stepArgs ctx expr
+                "label" -> undefined
+                "lambda" -> undefined
+                "quote" -> Step (Z ctx.parent (L (expr : ctx.args)))
+                _ -> Failure
+            Just expr1 -> Step (Z ctx0 (U expr1))
+        ExprList exprs -> stepU ctx0 exprs
+    (CtxFunc ctx, V expr) ->
+      case expr of
+        ExprAtom "quote" -> Step (Z ctx.parent (L (expr : ctx.args)))
+        _ -> stepArgs ctx expr
+    (CtxArgs ctx, U expr) ->
+      case expr of
+        ExprAtom atom ->
+          case Map.lookup atom ctx.env of
+            Nothing -> Failure
+            Just expr1 -> Step (Z ctx0 (V expr1))
+        ExprList exprs -> stepU ctx0 exprs
+    (CtxArgs ctx, V expr) ->
+      case ctx.right of
+        [] -> Step (Z ctx.parent (L (ctx.func : (reverse (expr : ctx.left)))))
+        right1 : rights1 ->
+          let ctx1 =
+                ArgsCtx
+                  { parent = ctx.parent,
+                    env = ctx.env,
+                    func = ctx.func,
+                    left = expr : ctx.left,
+                    right = rights1
+                  }
+           in Step (Z (CtxArgs ctx1) (U right1))
 
-    builtin :: Set Text
-    builtin =
-      Set.fromList
-        ["atom", "car", "cdr", "cond", "eq", "label", "lambda", "quote"]
+stepArgs :: FuncCtx -> Expr -> Step
+stepArgs ctx expr =
+  case ctx.args of
+    [] -> Step (Z ctx.parent (L [expr]))
+    arg1 : args1 ->
+      let ctx1 =
+            ArgsCtx
+              { parent = ctx.parent,
+                env = ctx.env,
+                func = expr,
+                left = [],
+                right = args1
+              }
+       in Step (Z (CtxArgs ctx1) (U arg1))
 
-stepF :: [Expr] -> Maybe Expr
-stepF = undefined
+stepL :: [Expr] -> Maybe Expr
+stepL = \case
+  [ExprAtom "atom", expr] ->
+    Just case expr of
+      ExprAtom _ -> ExprTrue
+      ExprList _ -> ExprFalse
+  [ExprAtom "quote", expr] -> Just expr
+  _ -> Nothing
+
+stepU :: Ctx -> [Expr] -> Step
+stepU ctx0 = \case
+  [] -> Failure
+  expr : exprs ->
+    let ctx1 =
+          FuncCtx
+            { parent = ctx0,
+              env = ctxenv ctx0,
+              args = exprs
+            }
+     in Step (Z (CtxFunc ctx1) (U expr))
 
 renderz :: Z -> Text
 renderz (Z ctx0 q) =
   let color =
         case q of
-          U _ -> Text.red
-          F _ -> Text.magenta
+          U _ -> Text.whiteBg . Text.black
+          L _ -> Text.magenta
           V _ -> Text.blue
    in go (color (showExpr (unq q))) ctx0
   where
     go expr = \case
-      _ -> undefined
-
--- Nil -> expr
--- Ctx env xs ctx ys ->
---   let expr1 = "(" <> Text.unwords (map showExpr (reverse xs) ++ [expr] ++ map showExpr ys) <> ")"
---    in go expr1 ctx
+      CtxNil -> expr
+      CtxArgs ArgsCtx {parent, env, func, left, right} ->
+        let expr1 =
+              "("
+                <> Text.unwords
+                  ( showExpr func :
+                    map showExpr (reverse left)
+                      ++ [expr]
+                      ++ map showExpr right
+                  )
+                <> ")"
+         in go expr1 parent
+      CtxFunc FuncCtx {parent, env, args} ->
+        let expr1 = "(" <> Text.unwords (expr : map showExpr args) <> ")"
+         in go expr1 parent
 
 itermay :: (a -> Maybe a) -> a -> a
 itermay f x =
