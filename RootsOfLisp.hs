@@ -9,6 +9,7 @@ import Data.Functor ((<&>))
 import qualified Data.List as List
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.ANSI as Text
@@ -366,13 +367,13 @@ data Z
 
 data Q
   = U Expr
-  | L [Expr]
+  | EvalFunction Text [Expr]
   | V Expr
 
 unq :: Q -> Expr
 unq = \case
   U expr -> expr
-  L exprs -> ExprList exprs
+  EvalFunction name args -> ExprList (ExprAtom name : args)
   V expr -> expr
 
 data Ctx
@@ -389,7 +390,7 @@ data FuncCtx = FuncCtx
 data ArgsCtx = ArgsCtx
   { parent :: Ctx,
     env :: Env,
-    func :: Expr,
+    func :: Text,
     left :: [Expr],
     right :: [Expr]
   }
@@ -412,10 +413,23 @@ data Step
 step :: Z -> Step
 step (Z ctx0 q) =
   case (ctx0, q) of
-    (_, L exprs) ->
-      case stepL exprs of
-        Nothing -> Failure
-        Just result -> Step (Z ctx0 (V result))
+    (_, EvalFunction name args) ->
+      let succeed result = Step (Z ctx0 (V result))
+       in case (name, args) of
+            ("atom", [expr]) ->
+              succeed case expr of
+                ExprAtom _ -> ExprTrue
+                ExprList _ -> ExprFalse
+            ("car", [ExprList (expr : _)]) -> succeed expr
+            ("cdr", [ExprList (_ : exprs)]) -> succeed (ExprList exprs)
+            ("cons", [expr, ExprList exprs]) -> succeed (ExprList (expr : exprs))
+            ("eq", [expr1, expr2]) ->
+              succeed case (expr1, expr2) of
+                (ExprAtom atom1, ExprAtom atom2) | atom1 == atom2 -> ExprTrue
+                (ExprList [], ExprList []) -> ExprTrue
+                _ -> ExprFalse
+            ("quote", [expr]) -> succeed expr
+            _ -> Failure
     (CtxNil, U expr) ->
       case expr of
         ExprAtom _ -> Failure
@@ -427,18 +441,19 @@ step (Z ctx0 q) =
           case Map.lookup atom ctx.env of
             Nothing ->
               case atom of
-                "atom" -> stepArgs ctx expr
-                "car" -> stepArgs ctx expr
-                "cdr" -> stepArgs ctx expr
                 "cond" -> undefined
-                "eq" -> stepArgs ctx expr
-                "label" -> undefined
-                "lambda" -> undefined
-                "quote" -> Step (Z ctx.parent (L (expr : ctx.args)))
-                _ -> Failure
+                "quote" -> Step (Z ctx.parent (EvalFunction atom ctx.args))
+                _ ->
+                  if Set.member atom (Set.fromList ["atom", "car", "cdr", "cons", "eq"])
+                    then stepArgs ctx atom
+                    else Failure
             Just expr1 -> Step (Z ctx0 (U expr1))
         ExprList exprs -> stepU ctx0 exprs
-    (CtxFunc ctx, V expr) -> stepArgs ctx expr
+    (CtxFunc ctx, V expr) ->
+      case expr of
+        ExprAtom name -> stepArgs ctx name
+        -- TODO: lambda, label
+        ExprList _ -> Failure
     (CtxArgs ctx, U expr) ->
       case expr of
         ExprAtom atom ->
@@ -448,7 +463,7 @@ step (Z ctx0 q) =
         ExprList exprs -> stepU ctx0 exprs
     (CtxArgs ctx, V expr) ->
       case ctx.right of
-        [] -> Step (Z ctx.parent (L (ctx.func : (reverse (expr : ctx.left)))))
+        [] -> Step (Z ctx.parent (EvalFunction ctx.func (reverse (expr : ctx.left))))
         right1 : rights1 ->
           let ctx1 =
                 ArgsCtx
@@ -460,16 +475,16 @@ step (Z ctx0 q) =
                   }
            in Step (Z (CtxArgs ctx1) (U right1))
 
-stepArgs :: FuncCtx -> Expr -> Step
-stepArgs ctx expr =
+stepArgs :: FuncCtx -> Text -> Step
+stepArgs ctx name =
   case ctx.args of
-    [] -> Step (Z ctx.parent (L [expr]))
+    [] -> Step (Z ctx.parent (EvalFunction name []))
     arg1 : args1 ->
       let ctx1 =
             ArgsCtx
               { parent = ctx.parent,
                 env = ctx.env,
-                func = expr,
+                func = name,
                 left = [],
                 right = args1
               }
@@ -501,7 +516,7 @@ renderz (Z ctx0 q) =
   let color =
         case q of
           U _ -> Text.whiteBg . Text.black
-          L _ -> Text.magenta
+          EvalFunction _ _ -> Text.magenta
           V _ -> Text.blue
    in go (color (showExpr (unq q))) ctx0
   where
@@ -511,7 +526,7 @@ renderz (Z ctx0 q) =
         let expr1 =
               "("
                 <> Text.unwords
-                  ( showExpr func :
+                  ( func :
                     map showExpr (reverse left)
                       ++ [expr]
                       ++ map showExpr right
